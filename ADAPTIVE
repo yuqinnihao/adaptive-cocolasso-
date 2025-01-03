@@ -1,0 +1,285 @@
+library("lars")
+library("mvtnorm")
+library("fields")
+library("matrixStats")
+library(stringr)
+
+
+
+### admm algo to create the positive definite estimate of the gram matrix ###
+maxproj.cov<-function(mat, epsilon=1e-4, mu=10, nitr.max=1e3, etol=1e-4){
+
+	p<-nrow(mat)
+	
+	# Initialization
+	R<-diag(mat)
+	S<-matrix(0,p,p)
+	L<-matrix(0,p,p)
+	
+	itr<-0
+	while (itr<nitr.max) {
+	Rp<-R
+	Sp<-S
+	
+	# Subproblem I: R step
+	W<-mat+S+mu*L
+	W.eigdec<-eigen(W, symmetric=TRUE)	
+	W.V<-W.eigdec$vectors
+	W.D<-W.eigdec$values
+	R<-W.V%*%diag(pmax(W.D,epsilon))%*%t(W.V)
+	
+	# Subproblem II: S step
+	M<-R-mat-mu*L	
+	S[lower.tri(S, diag = TRUE)]<-M[lower.tri(M, diag = TRUE)]-l1proj(v=M[lower.tri(M, diag = TRUE)],b=mu/2)	
+	for (i in 2:p){
+		for (j in 1:(i-1)){
+			S[j,i]<-S[i,j]
+		}
+	}
+	
+	# L step: update the Lagrange parameter
+	L<-L-(R-S-mat)/mu
+	
+    # Stopping Rule                        
+	#cat("check the stopping criterion:",max(abs(R-S-mat)),"\n")
+    if ((max(abs(R-Rp))<etol) && (max(abs(S-Sp))<etol) && (max(abs(R-S-mat))<etol)){
+	  itr<-nitr.max
+    } else {
+		itr<-itr+1
+	}
+	
+	if (itr%%20==0) {
+		mu<-mu/2
+	}
+	}
+	
+	return(R)
+
+}
+
+# Efficient projection onto L1 ball of specified radius (i.e. b), used by the admm algo
+# Ref. Duchi et al. (2008). Efficient Projections onto the L1-Ball for Learning in High Dimensions, ICML
+l1proj<-function(v, b){
+
+	stopifnot(b>0)
+	
+	u <- sort(abs(v),decreasing=TRUE)
+	sv <- cumsum(u)
+	rho <- max(which(u>(sv-b)/1:length(u)))
+	theta <- max(0, (sv[rho]-b)/rho)
+	w <-sign(v) * pmax(abs(v)-theta,0)
+
+	return(w)
+}
+
+#prediction-based selection#
+
+
+mspbs<-function(X, y, betav){
+  
+     n=nrow(betav)
+     PEvec=c(rep(0,n))
+     for (i in 1:n)
+     {
+     PEvec[i]= t(y-X%*%t(t(betav[i,])))%*%(y-X%*%t(t(betav[i,])))
+     }
+     id=which.min(PEvec)
+    
+     return(id)
+
+}
+	
+genData <- function(n, p, betastar, tau, sigma, rho, covtype){
+  # generates corrupted Gaussian data with diagonal covariance matrix
+  # additive noise is also isotropic Gaussian
+	if(covtype=="auto")
+	{
+		covar=rho^round(rdist(1:p,1:p),0)
+	}else
+	{
+		covar=(1-rho)*diag(p)+rho*matrix(1,p,p)
+	}
+  X=rmvnorm(n,rep(0,p),covar)
+  Xt=rmvnorm(n,rep(0,p),covar)
+  #Z=X+rnorm(n,rep(0,p),tau)
+  #X = matrix(rnorm(n*p), n, p); # matrix of covariates
+  W = tau * matrix(rnorm(n*p), n, p); # matrix of covariate noise
+  Wt = tau * matrix(rnorm(n*p), n, p)
+  Z = X + W; # observed covariates
+  Zt = Xt + Wt
+  y = X %*% betastar + sigma * c(rnorm(n)); # observed data
+  yt = Xt %*% betastar + sigma * c(rnorm(n)) 
+  return(list(Z=Z, X=X, y=y,Zt=Zt, Xt=Xt,yt=yt));
+}
+
+####### Example 1 #########
+n=80
+p=1000
+M=100
+PE1=c(rep(0,M))
+MSE1=c(rep(0,M))
+C1=c(rep(0,M))
+IC1=c(rep(0,M))
+PE11=c(rep(0,M))
+MSE11=c(rep(0,M))
+C11=c(rep(0,M))
+IC11=c(rep(0,M))
+maxsize = ceiling(p/2)
+
+
+betastar=rep(0,p)
+betastar[c(1,2,3,4,5,6,7)]=c(1,-0.5,0.7,-1.2,-0.9,0.3,0.55)
+
+### covariance struture for the predictors
+rho=0.5 ## autocorrelation
+sigma=1
+covtype="auto"
+if(covtype=="auto"){ covar=rho^round(rdist(1:p,1:p),0) } else
+ { covar=(1-rho)*diag(p)+rho*matrix(1,p,p)}
+
+tau=0.25
+
+
+set.seed(100)
+for (k in 1:M){
+     print(k)
+
+data=genData(n, p, betastar, tau, sigma, rho, covtype)
+     Z=data$Z
+     X=data$X
+     y=data$y
+     Zt=data$Zt
+     yt=data$yt
+     Xt=data$Xt
+
+	mat=t(Z)%*%Z/n-tau^2*diag(p)
+	if(min(eigen(mat)$value) < 1e-3)
+	{n
+		pdmat=maxproj.cov(mat=mat, epsilon=1e-3)
+	}else
+	{
+		pdmat=mat
+	}
+	tilZ=chol(n*pdmat)
+	tily=solve(t(tilZ),t(Z)%*%y)
+
+      mat1=t(Zt)%*%Zt/n-tau^2*diag(p)
+	if(min(eigen(mat1)$value) < 1e-3)
+	{
+		pdmat1=maxproj.cov(mat=mat1, epsilon=1e-3)
+	}else
+	{
+		pdmat1=mat1
+	}
+	tilZt=chol(n*pdmat1)
+	tilyt=solve(t(tilZt),t(Zt)%*%yt)
+
+
+      obj=lars(tilZ,tily,normalize=FALSE,intercept=FALSE)
+      coef1=coef(obj)
+      p1=nrow(coef1)
+      for(i in p1:1)
+      {
+      t=length(which(coef1[i,]!=0))
+      if (t>maxsize)
+       {
+       aaa=coef1[-i,]
+       }
+      else
+       {
+       aaa=coef1
+       }
+       coef1=aaa
+       }
+
+      id=mspbs(tilZt,tilyt,coef1)
+	obj1=coef1[id,]
+
+      omiga=1/abs(obj1) 
+      omiga[which(omiga==Inf)]=9999
+
+
+      tilZ1=scale(tilZ,center=FALSE,scale=omiga)
+      tilZt1=scale(tilZt,center=FALSE,scale=omiga)
+
+      obj2=lars(tilZ1,tily,normalize=FALSE,intercept=FALSE)
+      coef2=coef(obj2)
+      p2=nrow(coef2)
+      for(i in p2:1)
+       {
+      t=length(which(coef2[i,]!=0))
+      if (t>maxsize)
+       {
+       aaa=coef2[-i,]
+       }
+      else
+       {
+       aaa=coef2
+       }
+       coef2=aaa
+       }
+
+      id1=mspbs(tilZt1,tilyt,coef2)
+
+
+      objf=scale(t(coef2[id1,]),center=FALSE,scale=omiga)
+
+      PE1[k]=(objf-betastar)%*%covar%*%t(objf-betastar)
+      MSE1[k]=(objf-betastar)%*%t(objf-betastar)
+      objf1=objf[c(1,2,3,4,5,6,7)] 
+      objf2=objf[8:p] 
+      C1[k]=length(objf1[which(objf1!=0)])
+      IC1[k]=length(objf2[which(objf2!=0)])
+
+      PE11[k]=(t(obj1)-betastar)%*%covar%*%t(t(obj1)-betastar)
+      MSE11[k]=(t(obj1)-betastar)%*%t(t(obj1)-betastar)
+      obj11=obj1[c(1,2,3,4,5,6,7)] 
+      obj12=obj1[8:p] 
+      C11[k]=length(obj11[which(obj11!=0)])
+      IC11[k]=length(obj12[which(obj12!=0)])
+
+}
+    
+
+
+      PE=mean(PE1)
+      sPE=sd(PE1)/sqrt(M)
+      MSE=mean(MSE1)
+      sMSE=sd(MSE1)/sqrt(M)
+      C=mean(C1)
+      sC=sd(C1)/sqrt(M)
+      IC=mean(IC1)
+      sIC=sd(IC1)/sqrt(M)
+
+
+
+      PE1=mean(PE11)
+      sPE1=sd(PE11)/sqrt(M)
+      MSE1=mean(MSE11)
+      sMSE1=sd(MSE11)/sqrt(M)
+      C1=mean(C11)
+      sC1=sd(C11)/sqrt(M)
+      IC1=mean(IC11)
+      sIC1=sd(IC11)/sqrt(M)
+PE
+sPE
+MSE
+sMSE
+C
+sC
+IC
+sIC
+
+
+
+PE1
+sPE1
+MSE1
+sMSE1
+C1
+sC1
+IC1
+sIC1
+
+
+
